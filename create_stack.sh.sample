@@ -1,0 +1,9 @@
+aws cloudformation create-stack \
+  --stack-name whisper-webui-resources \
+  --template-body file://cloudformation.template.yaml \
+  --parameters \
+    ParameterKey=VpcId,ParameterValue=vpc-xxxxx \
+    ParameterKey=AlbIngressCidr,ParameterValue=0.0.0.0/0 \
+    ParameterKey=WhisperSecretName,ParameterValue=whisper-app-credentials \
+    ParameterKey=SageMakerEndpointName,ParameterValue=whisper-endpoint \
+  --capabilities CAPABILITY_NAMED_IAM

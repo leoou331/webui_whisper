@@ -1,0 +1,1 @@
+aws secretsmanager create-secret --name whisper-app-credentials --secret-string '{"admin":"password123"}

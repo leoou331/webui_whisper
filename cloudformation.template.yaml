@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for deploying Whisper Web UI to EKS (AWS resources only)'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the ALB will be created
+
+  AlbIngressCidr:
+    Type: String
+    Description: CIDR block for ALB security group inbound rules
+    Default: 0.0.0.0/0
+
+  WhisperSecretName:
+    Type: String
+    Description: Name of the Secret Manager secret containing user credentials
+    Default: whisper-app-credentials
+
+  SageMakerEndpointName:
+    Type: String
+    Description: Name of the SageMaker endpoint for Whisper inference
+    Default: whisper-endpoint
+
+Resources:
+  # Create EKS Node Role
+  EksNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws-cn:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws-cn:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws-cn:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Path: /
+      RoleName: eksNodeRole
+
+  # Create instance profile for the EKS nodes
+  EksNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EksNodeRole
+
+  # Attach SageMaker policy to the EKS Node Role
+  SageMakerInvokePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for invoking SageMaker endpoint
+      Roles:
+        - !Ref EksNodeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sagemaker:InvokeEndpoint'
+            Resource: !Sub 'arn:aws-cn:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${SageMakerEndpointName}'
+
+  # Create policy for Secrets Manager access
+  SecretsManagerAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for accessing Secrets Manager
+      Roles:
+        - !Ref EksNodeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: !Sub 'arn:aws-cn:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${WhisperSecretName}-*'
+
+  # Security Group for ALB
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Whisper Web UI ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AlbIngressCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AlbIngressCidr
+
+  # Add ALB controller permissions to the EKS node role
+  ALBControllerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for AWS Load Balancer Controller
+      Roles:
+        - !Ref EksNodeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:CreateTags'
+              - 'ec2:DeleteTags'
+              - 'ec2:DescribeAccountAttributes'
+              - 'ec2:DescribeAddresses'
+              - 'ec2:DescribeAvailabilityZones'
+              - 'ec2:DescribeInternetGateways'
+              - 'ec2:DescribeNetworkInterfaces'
+              - 'ec2:DescribeSecurityGroups'
+              - 'ec2:DescribeSubnets'
+              - 'ec2:DescribeVpcs'
+              - 'ec2:ModifyNetworkInterfaceAttribute'
+              - 'elasticloadbalancing:AddListenerCertificates'
+              - 'elasticloadbalancing:AddTags'
+              - 'elasticloadbalancing:CreateListener'
+              - 'elasticloadbalancing:CreateLoadBalancer'
+              - 'elasticloadbalancing:CreateRule'
+              - 'elasticloadbalancing:CreateTargetGroup'
+              - 'elasticloadbalancing:DeleteListener'
+              - 'elasticloadbalancing:DeleteLoadBalancer'
+              - 'elasticloadbalancing:DeleteRule'
+              - 'elasticloadbalancing:DeleteTargetGroup'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:DescribeListenerCertificates'
+              - 'elasticloadbalancing:DescribeListeners'
+              - 'elasticloadbalancing:DescribeLoadBalancers'
+              - 'elasticloadbalancing:DescribeLoadBalancerAttributes'
+              - 'elasticloadbalancing:DescribeRules'
+              - 'elasticloadbalancing:DescribeSSLPolicies'
+              - 'elasticloadbalancing:DescribeTags'
+              - 'elasticloadbalancing:DescribeTargetGroups'
+              - 'elasticloadbalancing:DescribeTargetGroupAttributes'
+              - 'elasticloadbalancing:DescribeTargetHealth'
+              - 'elasticloadbalancing:ModifyListener'
+              - 'elasticloadbalancing:ModifyLoadBalancerAttributes'
+              - 'elasticloadbalancing:ModifyRule'
+              - 'elasticloadbalancing:ModifyTargetGroup'
+              - 'elasticloadbalancing:ModifyTargetGroupAttributes'
+              - 'elasticloadbalancing:RegisterTargets'
+              - 'elasticloadbalancing:RemoveListenerCertificates'
+              - 'elasticloadbalancing:RemoveTags'
+              - 'elasticloadbalancing:SetIpAddressType'
+              - 'elasticloadbalancing:SetSecurityGroups'
+              - 'elasticloadbalancing:SetSubnets'
+              - 'iam:CreateServiceLinkedRole'
+              - 'iam:GetServerCertificate'
+              - 'iam:ListServerCertificates'
+              - 'waf-regional:GetWebACLForResource'
+              - 'waf-regional:GetWebACL'
+              - 'waf-regional:AssociateWebACL'
+              - 'waf-regional:DisassociateWebACL'
+              - 'tag:GetResources'
+              - 'tag:TagResources'
+              - 'waf:GetWebACL'
+            Resource: '*'
+
+Outputs:
+  ALBSecurityGroupId:
+    Description: Security Group ID for the ALB
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBSecurityGroupId"
+  
+  EksNodeRoleName:
+    Description: Name of the created IAM role for EKS Worker Nodes
+    Value: !Ref EksNodeRole
+    Export:
+      Name: !Sub "${AWS::StackName}-EksNodeRoleName"
+  
+  EksNodeInstanceProfileName:
+    Description: Name of the created Instance Profile for EKS Worker Nodes
+    Value: !Ref EksNodeInstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-EksNodeInstanceProfileName"
