@@ -151,10 +151,22 @@ python demo_client.py
 
 ### 自定义API
 
-项目提供了两种API端点：
+项目提供了以下几个主要API端点：
 
-- `/transcribe`: Web界面使用的流式转录端点
-- `/api/transcribe`: 适用于程序化访问的JSON API
+- `/login`: 用于用户认证，接受POST请求，包含用户名和密码
+- `/transcribe`: 接收音频文件上传的端点，处理文件并启动转录过程
+- `/stream`: 提供实时转录结果的Server-Sent Events (SSE)流
+- `/api/transcribe`: 一站式转录API，适用于程序化访问，直接返回JSON格式的完整转录结果
+
+典型的API调用流程：
+1. 向`/login`发送POST请求进行认证
+2. 向`/transcribe`上传音频文件
+3. 连接到`/stream`获取实时转录结果
+
+或者:
+- 直接向`/api/transcribe`发送带有音频文件的POST请求，获取完整转录结果（仍需先登录）
+
+详细的API使用方法可以参考`demo_client.py`中的示例代码。
 
 ## 故障排除
 
