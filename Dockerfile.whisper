@@ -1,0 +1,51 @@
+# 使用中国区ECR的PyTorch推理镜像
+FROM 727897471807.dkr.ecr.cn-northwest-1.amazonaws.com.cn/pytorch-inference:1.12-gpu-py38
+
+# 设置工作目录
+WORKDIR /opt/ml/code
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=TRUE
+ENV PYTHONDONTWRITEBYTECODE=TRUE
+ENV PATH="/opt/ml/code:${PATH}"
+
+# 使用清华大学镜像源加速pip安装
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 预安装所有必要的依赖包，避免运行时下载
+RUN pip install --no-cache-dir \
+    openai-whisper \
+    torch \
+    torchaudio \
+    numpy \
+    scipy \
+    librosa \
+    soundfile \
+    tiktoken \
+    regex \
+    ftfy \
+    more-itertools \
+    transformers
+
+# 复制推理代码
+COPY code/inference.py /opt/ml/code/inference.py
+
+# 复制模型文件到正确位置
+COPY turbo.pt /opt/ml/model/turbo.pt
+
+# 设置正确的权限
+RUN chmod +x /opt/ml/code/inference.py
+
+# 暴露SageMaker推理端口
+EXPOSE 8080
+
+# 预热whisper模块，确保所有依赖都已加载
+RUN python -c "import whisper; print('Whisper module loaded successfully')"
+
+# 设置入口点 - 使用SageMaker推理服务器
+ENTRYPOINT ["python", "/usr/local/bin/dockerd-entrypoint.py"]

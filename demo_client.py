@@ -18,6 +18,8 @@ BASE_URL = os.environ.get("WHISPER_API_URL", "http://localhost:8080")
 USERNAME = os.environ.get("WHISPER_USERNAME", "")
 PASSWORD = os.environ.get("WHISPER_PASSWORD", "")
 AUDIO_FILE = os.environ.get("WHISPER_AUDIO_FILE", "")
+HOTWORDS = os.environ.get("WHISPER_HOTWORDS", "")  # 逗号分隔的热词
+HOTWORD_METHOD = os.environ.get("WHISPER_HOTWORD_METHOD", "prompt_injection")  # prompt_injection 或 logit_bias
 
 logger.info(f"配置信息: API URL = {BASE_URL}")
 logger.info(f"音频文件: {AUDIO_FILE}")
@@ -58,16 +60,16 @@ def login(username, password):
         logger.error(f"登录请求异常: {str(e)}")
         return None
 
-def transcribe_audio(session, audio_file_path):
+def transcribe_audio(session, audio_file_path, hotwords_config=None):
     """上传并转录音频文件"""
     # 检查文件是否存在
     if not os.path.exists(audio_file_path):
         logger.error(f"错误: 文件 {audio_file_path} 不存在")
         return
         
-    # 检查文件是否为MP3格式
-    if not audio_file_path.lower().endswith('.mp3'):
-        logger.error("错误: 只支持MP3文件")
+    # 检查文件是否为MP3或M4A格式
+    if not (audio_file_path.lower().endswith('.mp3') or audio_file_path.lower().endswith('.m4a')):
+        logger.error("错误: 只支持MP3和M4A文件")
         return
     
     # 第1步: 上传文件到 /transcribe 端点
@@ -79,12 +81,21 @@ def transcribe_audio(session, audio_file_path):
         logger.info(f"文件大小: {file_size / 1024:.2f} KB")
         
         with open(audio_file_path, 'rb') as f:
+            # 准备文件和表单数据
             files = {'audio_file': (os.path.basename(audio_file_path), f, 'audio/mpeg')}
+            data = {}
+            
+            # 添加热词配置
+            if hotwords_config:
+                data['hotwords'] = json.dumps(hotwords_config.get('words', []))
+                data['hotword_method'] = hotwords_config.get('method', 'prompt_injection')
+                logger.info(f"使用热词配置: {hotwords_config}")
             
             logger.info("正在上传音频文件...")
             response = session.post(
                 transcribe_url,
                 files=files,
+                data=data,
                 timeout=60  # 较长的超时时间用于上传大文件
             )
         
@@ -112,86 +123,169 @@ def transcribe_audio(session, audio_file_path):
         response = session.get(stream_url, stream=True, timeout=5)
         logger.debug(f"SSE连接状态码: {response.status_code}")
         
-        # 使用 sseclient 处理 Server-Sent Events
-        logger.info("开始处理事件流...")
-        client = sseclient.SSEClient(response)
+        # 检查响应是否成功
+        if response.status_code != 200:
+            logger.error(f"连接事件流失败! 状态码: {response.status_code}")
+            logger.error(f"响应内容: {response.text}")
+            return None
         
-        # 保存完整转录结果
-        full_transcript = ""
+        # 添加调试信息，查看响应的内容类型和前几个字节
+        logger.debug(f"响应内容类型: {response.headers.get('Content-Type', 'unknown')}")
+        logger.debug(f"响应开始部分: {next(response.iter_content(chunk_size=100), b'').decode('utf-8', errors='ignore')}")
         
-        # 处理事件流
-        print("\n开始接收转录结果流:")
-        print("-" * 50)
+        # 重置响应以便我们可以从头开始读取
+        response = session.get(stream_url, stream=True, timeout=30)
         
-        event_count = 0
-        timeout_start = time.time()
-        timeout_limit = 300  # 5分钟超时限制
-        
-        for event in client.events():
-            # 重置超时计时器
+        try:
+            # 使用 sseclient 处理 Server-Sent Events
+            logger.info("开始处理事件流...")
+            client = sseclient.SSEClient(response)
+            
+            # 保存完整转录结果
+            full_transcript = ""
+            
+            # 处理事件流
+            print("\n开始接收转录结果流:")
+            print("-" * 50)
+            
+            event_count = 0
             timeout_start = time.time()
-            event_count += 1
+            timeout_limit = 300  # 5分钟超时限制
             
-            logger.debug(f"收到事件 #{event_count}: {event.data[:50]}...")
-            
-            try:
-                data = json.loads(event.data)
-                event_type = data.get("type")
+            for event in client.events():
+                # 重置超时计时器
+                timeout_start = time.time()
+                event_count += 1
                 
-                if event_type == "init":
-                    logger.info(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
-                    print(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
-                    
-                elif event_type == "progress":
-                    progress = data["progress"]
-                    current_segment = data["current_segment"]
-                    transcript = data["transcript"]
-                    
-                    # 记录进度日志（每10%记录一次）
-                    if progress % 10 == 0:
-                        logger.info(f"转录进度: {progress}% (段 {current_segment})")
-                    
-                    # 打印进度条
-                    progress_bar = f"[{'#' * int(progress/2)}{' ' * (50-int(progress/2))}] {progress}%"
-                    print(f"\r处理中: {progress_bar} (段 {current_segment})", end="")
-                    
-                    # 保存最新的转录结果
-                    full_transcript = transcript
-                    
-                elif event_type == "complete":
-                    logger.info("转录完成!")
-                    print("\n\n转录完成!")
-                    print("-" * 50)
-                    full_transcript = data["transcript"]
-                    break
-                    
-                elif event_type == "error":
-                    logger.error(f"转录错误: {data['message']}")
-                    print(f"\n转录错误: {data['message']}")
-                    break
-                else:
-                    logger.warning(f"收到未知类型的事件: {event_type}")
+                logger.debug(f"收到事件 #{event_count}: {event.data[:50]}...")
                 
-            except json.JSONDecodeError as e:
-                logger.error(f"解析事件数据失败: {str(e)}")
-                logger.error(f"原始数据: {event.data}")
-                continue
+                try:
+                    data = json.loads(event.data)
+                    event_type = data.get("type")
+                    
+                    if event_type == "init":
+                        logger.info(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
+                        print(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
+                        
+                    elif event_type == "progress":
+                        progress = data["progress"]
+                        current_segment = data["current_segment"]
+                        transcript = data["transcript"]
+                        
+                        # 记录进度日志（每10%记录一次）
+                        if progress % 10 == 0:
+                            logger.info(f"转录进度: {progress}% (段 {current_segment})")
+                        
+                        # 打印进度条
+                        progress_bar = f"[{'#' * int(progress/2)}{' ' * (50-int(progress/2))}] {progress}%"
+                        print(f"\r处理中: {progress_bar} (段 {current_segment})", end="")
+                        
+                        # 保存最新的转录结果
+                        full_transcript = transcript
+                        
+                    elif event_type == "complete":
+                        logger.info("转录完成!")
+                        print("\n\n转录完成!")
+                        print("-" * 50)
+                        full_transcript = data["transcript"]
+                        return full_transcript
+                        
+                    elif event_type == "error":
+                        logger.error(f"转录错误: {data['message']}")
+                        print(f"\n转录错误: {data['message']}")
+                        return None
+                    else:
+                        logger.warning(f"收到未知类型的事件: {event_type}")
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"解析事件数据失败: {str(e)}")
+                    logger.error(f"原始数据: {event.data}")
+                    continue
+                
+                # 检查超时
+                if time.time() - timeout_start > timeout_limit:
+                    logger.error(f"等待事件超时! 已经等待了 {timeout_limit} 秒")
+                    print("\n处理超时! 请检查服务器状态。")
+                    break
             
-            # 检查超时
-            if time.time() - timeout_start > timeout_limit:
-                logger.error(f"等待事件超时! 已经等待了 {timeout_limit} 秒")
-                print("\n处理超时! 请检查服务器状态。")
-                break
-        
-        logger.info(f"事件流处理完成，共接收 {event_count} 个事件")
-        return full_transcript
-        
+            logger.info(f"事件流处理完成，共接收 {event_count} 个事件")
+            return full_transcript
+            
+        except ValueError as e:
+            logger.error(f"SSE解析错误: {str(e)}")
+            logger.error("尝试使用备用方法解析响应...")
+            
+            # 备用方法: 手动解析响应流
+            full_transcript = ""
+            lines_buffer = []
+            current_line = ""
+            
+            # 手动读取并解析流数据
+            for chunk in response.iter_content(chunk_size=1024, decode_unicode=True):
+                if not chunk:
+                    continue
+                    
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode('utf-8', errors='ignore')
+                
+                # 将块添加到当前行
+                current_line += chunk
+                
+                # 查找行边界
+                if '\n\n' in current_line:
+                    lines = current_line.split('\n\n')
+                    # 保留最后一个可能不完整的行
+                    current_line = lines.pop()
+                    lines_buffer.extend(lines)
+                
+                # 处理完整的消息
+                while lines_buffer:
+                    line = lines_buffer.pop(0).strip()
+                    if line.startswith('data: '):
+                        try:
+                            data = json.loads(line[6:])  # 去掉 'data: ' 前缀
+                            event_type = data.get("type")
+                            
+                            if event_type == "init":
+                                logger.info(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
+                                print(f"初始化转录 - 总计 {data['total_segments']} 个音频段")
+                                
+                            elif event_type == "progress":
+                                progress = data["progress"]
+                                current_segment = data["current_segment"]
+                                transcript = data["transcript"]
+                                
+                                if progress % 10 == 0:
+                                    logger.info(f"转录进度: {progress}% (段 {current_segment})")
+                                
+                                progress_bar = f"[{'#' * int(progress/2)}{' ' * (50-int(progress/2))}] {progress}%"
+                                print(f"\r处理中: {progress_bar} (段 {current_segment})", end="")
+                                
+                                full_transcript = transcript
+                                
+                            elif event_type == "complete":
+                                logger.info("转录完成!")
+                                print("\n\n转录完成!")
+                                print("-" * 50)
+                                full_transcript = data["transcript"]
+                                return full_transcript
+                                
+                            elif event_type == "error":
+                                logger.error(f"转录错误: {data['message']}")
+                                print(f"\n转录错误: {data['message']}")
+                                return None
+                                
+                        except json.JSONDecodeError as je:
+                            logger.error(f"解析JSON失败: {str(je)}, 原始数据: {line[6:]}")
+            
+            return full_transcript
+            
     except requests.exceptions.RequestException as e:
         logger.error(f"连接事件流时发生错误: {str(e)}")
         print(f"\n连接错误: {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"处理事件流时发生未知错误: {str(e)}")
+        logger.error(f"处理事件流时发生未知错误: {str(e)}", exc_info=True)
         print(f"\n处理错误: {str(e)}")
         return None
 
@@ -207,6 +301,19 @@ def main():
         print("错误: 请设置 WHISPER_AUDIO_FILE 环境变量指定音频文件路径")
         return
     
+    # 处理热词配置
+    hotwords_config = None
+    if HOTWORDS:
+        hotwords_list = [word.strip() for word in HOTWORDS.split(',') if word.strip()]
+        if hotwords_list:
+            hotwords_config = {
+                'method': HOTWORD_METHOD,
+                'words': hotwords_list,
+                'boost_factor': 1.5
+            }
+            logger.info(f"热词配置: {hotwords_config}")
+            print(f"使用热词: {', '.join(hotwords_list)} (方法: {HOTWORD_METHOD})")
+    
     try:
         # 步骤1: 登录
         logger.info("=== 步骤1: 登录 ===")
@@ -216,7 +323,7 @@ def main():
         
         # 步骤2: 转录音频
         logger.info("=== 步骤2: 转录音频 ===")
-        transcript = transcribe_audio(session, AUDIO_FILE)
+        transcript = transcribe_audio(session, AUDIO_FILE, hotwords_config)
         
         # 显示最终结果
         if transcript:

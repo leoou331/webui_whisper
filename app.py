@@ -73,6 +73,25 @@ def get_credentials():
         app.logger.error(f"Error fetching credentials: {str(e)}")
         return {}
 
+def process_hotwords_config(request):
+    """处理热词配置"""
+    try:
+        hotwords_json = request.form.get('hotwords', '[]')
+        hotwords = json.loads(hotwords_json) if hotwords_json else []
+        method = request.form.get('hotword_method', 'prompt_injection')
+        
+        config = {
+            'method': method,
+            'words': hotwords,
+            'boost_factor': 1.5  # 默认增强因子，用于logit_bias方法
+        }
+        
+        app.logger.info(f"处理热词配置: {config}")
+        return config
+    except Exception as e:
+        app.logger.error(f"处理热词配置时出错: {str(e)}")
+        return {'method': 'prompt_injection', 'words': [], 'boost_factor': 1.5}
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -128,27 +147,39 @@ def transcribe():
         flash('No file selected', 'danger')
         return redirect(url_for('index'))
         
-    if file and file.filename.endswith('.mp3'):
+    # 修改此处以支持M4A格式
+    supported_formats = ['.mp3', '.m4a']
+    file_ext = os.path.splitext(file.filename.lower())[1]
+    
+    if file and file_ext in supported_formats:
+        # 确定文件格式
+        format_name = file_ext[1:]  # 去掉点号
+        
         # Save file to temp location
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp:
             file.save(temp.name)
             temp_filename = temp.name
             
-        # 将临时文件名保存到会话中
+        # 处理热词配置
+        hotwords_config = process_hotwords_config(request)
+        
+        # 将临时文件名、格式和热词配置保存到会话中
         session['temp_filename'] = temp_filename
+        session['file_format'] = format_name
+        session['hotwords_config'] = hotwords_config
         
         # 明确保存会话 - 确保会话状态被持久化
         session.modified = True
         
         # 添加调试日志
-        app.logger.info(f"保存临时文件: {temp_filename}")
-        app.logger.info(f"会话ID: {session.sid if hasattr(session, 'sid') else '无会话ID'}")
+        app.logger.info(f"保存临时文件: {temp_filename}, 格式: {format_name}")
+        app.logger.info(f"热词配置: {hotwords_config}")
         
         # 返回包含进度页面的HTML
         return render_template('transcribe.html')
         
     else:
-        flash('Only MP3 files are allowed', 'danger')
+        flash('Invalid file format. Please upload MP3 or M4A files.', 'danger')
         return redirect(url_for('index'))
 
 @app.route('/stream', methods=['GET'])
@@ -184,8 +215,16 @@ def process_audio(file_path):
         if not predictor:
             raise Exception("Failed to create SageMaker predictor")
             
-        # Load audio file
-        audio_full = AudioSegment.from_file(file_path, format="mp3")
+        # 获取热词配置
+        hotwords_config = session.get('hotwords_config', {'method': 'prompt_injection', 'words': [], 'boost_factor': 1.5})
+        app.logger.info(f"使用热词配置: {hotwords_config}")
+        
+        # 确定文件格式 - 从会话中获取或从文件路径推断
+        file_format = session.get('file_format', 'mp3')
+        app.logger.info(f"加载音频文件，格式: {file_format}")
+        
+        # Load audio file with appropriate format
+        audio_full = AudioSegment.from_file(file_path, format=file_format)
         
         # Whisper expects 16 kHz, mono channel, ≤30s
         audio_full = audio_full.set_channels(1).set_frame_rate(16000)
@@ -198,7 +237,8 @@ def process_audio(file_path):
         # 初始页面设置 - 使用SSE (Server-Sent Events)格式
         yield "data: " + json.dumps({
             "type": "init",
-            "total_segments": total_segments
+            "total_segments": total_segments,
+            "hotwords_config": hotwords_config
         }) + "\n\n"
         
         # Initialize empty transcript
@@ -215,8 +255,8 @@ def process_audio(file_path):
             app.logger.info(f"Processing chunk {i+1}/{total_segments}, length: {len(samples)} samples")
             
             try:
-                # 使用 predictor 而不是直接调用 boto3
-                text = predictor.predict(samples)
+                # 应用热词处理
+                text = predict_with_hotwords(predictor, samples, hotwords_config)
                 app.logger.info(f"Transcription result: {text[:100]}...")
                 transcripts.append(text)
             except Exception as e:
@@ -555,6 +595,9 @@ if __name__ == '__main__':
             cursor: pointer;
             margin-right: 10px;
         }
+        .btn-secondary {
+            background-color: #6c757d;
+        }
         .result {
             margin-top: 20px;
             padding: 15px;
@@ -577,6 +620,57 @@ if __name__ == '__main__':
             padding: 10px;
             margin-bottom: 15px;
         }
+        .hotwords-section {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .hotwords-section h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .method-selection {
+            margin-bottom: 15px;
+        }
+        .method-selection label {
+            margin-right: 15px;
+            font-weight: normal;
+        }
+        .method-selection input[type="radio"] {
+            margin-right: 5px;
+        }
+        #hotword-input {
+            padding: 8px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            margin-right: 10px;
+            width: 200px;
+        }
+        #hotwords-display {
+            margin-top: 10px;
+        }
+        #hotwords-list {
+            margin-top: 5px;
+        }
+        .hotword-item {
+            display: inline-block;
+            background-color: #007bff;
+            color: white;
+            padding: 4px 8px;
+            margin: 2px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .hotword-remove {
+            margin-left: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .hotword-remove:hover {
+            color: #ff6b6b;
+        }
     </style>
 </head>
 <body>
@@ -594,14 +688,37 @@ if __name__ == '__main__':
     {% endwith %}
     
     <div class="info">
-        <p>Upload MP3 files of any length. Long recordings will be processed in 30-second chunks with results displayed in real-time.</p>
+        <p>Upload MP3 or M4A files of any length. Long recordings will be processed in 30-second chunks with results displayed in real-time.</p>
     </div>
     
     <form method="post" action="{{ url_for('transcribe') }}" enctype="multipart/form-data">
         <div class="form-group">
-            <label for="audio_file">Upload MP3 File:</label>
-            <input type="file" id="audio_file" name="audio_file" accept=".mp3" required>
+            <label for="audio_file">Upload Audio File:</label>
+            <input type="file" id="audio_file" name="audio_file" accept=".mp3,.m4a" required>
         </div>
+        
+        <div class="hotwords-section">
+            <h3>热词配置 (Hotwords Configuration)</h3>
+            
+            <div class="method-selection">
+                <label>技术方式 (Method):</label>
+                <label><input type="radio" name="hotword_method" value="prompt_injection" checked> Prompt注入</label>
+                <label><input type="radio" name="hotword_method" value="logit_bias"> Logit Bias</label>
+            </div>
+            
+            <div class="form-group">
+                <input type="text" id="hotword-input" placeholder="输入热词..." maxlength="50">
+                <button type="button" class="btn btn-secondary" onclick="addHotword()">添加</button>
+            </div>
+            
+            <div id="hotwords-display">
+                <label>当前热词:</label>
+                <div id="hotwords-list"></div>
+            </div>
+            
+            <input type="hidden" id="hotwords-data" name="hotwords" value="">
+        </div>
+        
         <button type="submit" class="btn">转文字 (Transcribe)</button>
     </form>
     
@@ -611,6 +728,45 @@ if __name__ == '__main__':
         <p>{{ transcription }}</p>
     </div>
     {% endif %}
+    
+    <script>
+        let hotwords = [];
+        
+        function addHotword() {
+            const input = document.getElementById('hotword-input');
+            const word = input.value.trim();
+            
+            if (word && !hotwords.includes(word)) {
+                hotwords.push(word);
+                updateHotwordsDisplay();
+                input.value = '';
+            }
+        }
+        
+        function removeHotword(word) {
+            hotwords = hotwords.filter(w => w !== word);
+            updateHotwordsDisplay();
+        }
+        
+        function updateHotwordsDisplay() {
+            const list = document.getElementById('hotwords-list');
+            const data = document.getElementById('hotwords-data');
+            
+            list.innerHTML = hotwords.map(word => 
+                `<span class="hotword-item">${word}<span class="hotword-remove" onclick="removeHotword('${word}')">&times;</span></span>`
+            ).join('');
+            
+            data.value = JSON.stringify(hotwords);
+        }
+        
+        // 支持回车键添加热词
+        document.getElementById('hotword-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addHotword();
+            }
+        });
+    </script>
 </body>
 </html>
         ''')
@@ -788,6 +944,104 @@ if __name__ == '__main__':
 </body>
 </html>
     ''')
+
+def predict_with_hotwords(predictor, samples, hotwords_config):
+    """使用热词配置进行预测"""
+    method = hotwords_config.get('method', 'prompt_injection')
+    words = hotwords_config.get('words', [])
     
+    if not words:
+        # 没有热词，使用标准预测
+        return predictor.predict(samples)
+    
+    if method == 'prompt_injection':
+        return predict_with_prompt_injection(predictor, samples, words)
+    elif method == 'logit_bias':
+        return predict_with_logit_bias(predictor, samples, words, hotwords_config.get('boost_factor', 1.5))
+    else:
+        # 默认使用标准预测
+        return predictor.predict(samples)
+
+def predict_with_prompt_injection(predictor, samples, hotwords):
+    """使用Prompt注入方法"""
+    try:
+        # 构建包含热词的提示
+        prompt = f"以下音频可能包含这些词汇: {', '.join(hotwords)}。请准确转录音频内容。"
+        
+        # 创建包含prompt的请求数据
+        request_data = {
+            'audio': samples.tolist(),
+            'initial_prompt': prompt
+        }
+        
+        # 使用自定义序列化器发送请求
+        response = predictor.predict(request_data)
+        return response
+    except Exception as e:
+        app.logger.warning(f"Prompt注入失败，回退到标准预测: {str(e)}")
+        return predictor.predict(samples)
+
+def predict_with_logit_bias(predictor, samples, hotwords, boost_factor):
+    """使用Logit Bias方法"""
+    try:
+        # 构建logit bias配置
+        # 注意：这需要根据实际的SageMaker端点实现来调整
+        logit_bias = {word: boost_factor for word in hotwords}
+        
+        request_data = {
+            'audio': samples.tolist(),
+            'logit_bias': logit_bias
+        }
+        
+        response = predictor.predict(request_data)
+        return response
+    except Exception as e:
+        app.logger.warning(f"Logit Bias失败，回退到标准预测: {str(e)}")
+        return predictor.predict(samples)
+
+# 添加热词配置API端点
+@app.route('/api/hotwords', methods=['GET', 'POST'])
+@login_required
+def api_hotwords():
+    """热词配置API"""
+    if request.method == 'GET':
+        # 返回当前会话的热词配置
+        config = session.get('hotwords_config', {'method': 'prompt_injection', 'words': [], 'boost_factor': 1.5})
+        return jsonify(config)
+    
+    elif request.method == 'POST':
+        try:
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({'error': 'No JSON data provided'}), 400
+            
+            method = data.get('method', 'prompt_injection')
+            words = data.get('words', [])
+            boost_factor = data.get('boost_factor', 1.5)
+            
+            # 验证方法
+            if method not in ['prompt_injection', 'logit_bias']:
+                return jsonify({'error': 'Invalid method. Use prompt_injection or logit_bias'}), 400
+            
+            # 验证热词列表
+            if not isinstance(words, list):
+                return jsonify({'error': 'Words must be a list'}), 400
+            
+            # 保存到会话
+            session['hotwords_config'] = {
+                'method': method,
+                'words': words,
+                'boost_factor': boost_factor
+            }
+            session.modified = True
+            
+            return jsonify({'success': True, 'config': session['hotwords_config']})
+            
+        except Exception as e:
+            app.logger.error(f"处理热词配置API时出错: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
     # Run the application
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
